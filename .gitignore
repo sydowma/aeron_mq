@@ -28,12 +28,12 @@ buildNumber.properties
 Thumbs.db
 
 # Logs
-logs/
+/logs/
 *.log
 
 # Runtime data
-data/
-aeron/
+/data/
+/aeron/
 /dev/shm/aeron*
 
 # Build artifacts
