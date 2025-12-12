@@ -1,11 +1,12 @@
 # Build stage
-FROM eclipse-temurin:25-jdk AS builder
+FROM azul/zulu-openjdk:25 AS builder
+
+# Install Maven
+RUN apt-get update && apt-get install -y maven && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy Maven wrapper and pom files
-COPY mvnw .
-COPY .mvn .mvn
+# Copy pom files first for dependency caching
 COPY pom.xml .
 COPY aeron-mq-protocol/pom.xml aeron-mq-protocol/
 COPY aeron-mq-broker/pom.xml aeron-mq-broker/
@@ -13,7 +14,7 @@ COPY aeron-mq-gateway/pom.xml aeron-mq-gateway/
 COPY aeron-mq-server/pom.xml aeron-mq-server/
 
 # Download dependencies (cached layer)
-RUN chmod +x mvnw && ./mvnw dependency:go-offline -B
+RUN mvn dependency:go-offline -B || true
 
 # Copy source code
 COPY aeron-mq-protocol/src aeron-mq-protocol/src
@@ -22,14 +23,15 @@ COPY aeron-mq-gateway/src aeron-mq-gateway/src
 COPY aeron-mq-server/src aeron-mq-server/src
 
 # Build the application
-RUN ./mvnw package -DskipTests -B
+RUN mvn package -DskipTests -B
 
-# Runtime stage
-FROM eclipse-temurin:25-jre
+# Runtime stage - reuse JDK
+FROM azul/zulu-openjdk:25
 
 # Install necessary tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     dumb-init \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -61,4 +63,3 @@ ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 
 # Start the server
 CMD ["sh", "-c", "java $JAVA_OPTS --enable-preview -jar /app/aeron-mq.jar"]
-
