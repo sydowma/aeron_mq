@@ -192,9 +192,15 @@ public final class PartitionLog implements AutoCloseable {
             // Each Aeron fragment corresponds to one appended record-batch (we enforce no fragmentation on append).
             while (!image.isClosed()) {
                 final int fragments = image.poll((buffer, offset, fragmentLength, header) -> {
-                    positionsByOffset.addLong(header.position());
+                    // Header.position() is the *end position* of this frame (uses nextTermOffset).
+                    // We persist the *start position* so replay(start, span) yields exactly this frame.
+                    final int span = align(header.frameLength(), FrameDescriptor.FRAME_ALIGNMENT);
+                    final long endPosition = header.position();
+                    final long frameStartPosition = endPosition - span;
+
+                    positionsByOffset.addLong(frameStartPosition);
                     payloadLengthsByOffset.addInt(fragmentLength);
-                    spansByOffset.addInt(align(header.frameLength(), FrameDescriptor.FRAME_ALIGNMENT));
+                    spansByOffset.addInt(span);
                 }, 10);
 
                 if (fragments == 0) {
@@ -251,43 +257,40 @@ public final class PartitionLog implements AutoCloseable {
             return -1;
         }
 
-        final long baseOffset;
-        final long startPosition;
-        synchronized (this) {
-            baseOffset = nextOffset;
-            startPosition = pub.position();
-        }
-
         final BackoffIdleStrategy idle = new BackoffIdleStrategy(1, 10, 1_000, 100_000);
         final long deadlineNs = System.nanoTime() + OFFER_TIMEOUT.toNanos();
-        long result;
-        while (true) {
-            result = pub.offer(buffer, offset, length);
-            if (result >= 0) {
-                break;
-            }
-            if (result == ExclusivePublication.NOT_CONNECTED ||
-                result == ExclusivePublication.MAX_POSITION_EXCEEDED) {
-                LOG.error("Failed to append to {}: result={}", topicPartition, result);
-                return -1;
-            }
-            if (System.nanoTime() >= deadlineNs) {
-                LOG.warn("Append timed out due to backpressure for {}: result={}", topicPartition, result);
-                return -1;
-            }
-            idle.idle();
-        }
-
-        // Update index and next offset (each record batch = 1 Kafka offset in this prototype).
         synchronized (this) {
+            // ExclusivePublication is not thread-safe; enforce single-writer per partition.
+            final long baseOffset = nextOffset;
+            final long startPosition = pub.position();
+
+            long result;
+            while (true) {
+                result = pub.offer(buffer, offset, length);
+                if (result >= 0) {
+                    break;
+                }
+                if (result == ExclusivePublication.NOT_CONNECTED ||
+                    result == ExclusivePublication.MAX_POSITION_EXCEEDED) {
+                    LOG.error("Failed to append to {}: result={}", topicPartition, result);
+                    return -1;
+                }
+                if (System.nanoTime() >= deadlineNs) {
+                    LOG.warn("Append timed out due to backpressure for {}: result={}", topicPartition, result);
+                    return -1;
+                }
+                idle.idle();
+            }
+
+            // Update index and next offset (each record batch = 1 Kafka offset in this prototype).
             final int span = (int) (result - startPosition);
             positionsByOffset.addLong(startPosition);
             payloadLengthsByOffset.addInt(length);
             spansByOffset.addInt(span);
             nextOffset++;
-        }
 
-        return baseOffset;
+            return baseOffset;
+        }
     }
 
     /**
